@@ -1,4 +1,4 @@
-# ⬡ Anozie's TruckLog — Electronic Driver Log System
+# 🚚 Anozie's TruckLog — Electronic Driver Log System
 
 A full-stack ELD (Electronic Logging Device) platform for FMCSA-regulated property-carrying truck drivers. Replaces paper "Drivers Daily Log" forms with a digital system that enforces HOS rules, auto-syncs activity totals, manages co-driver workflows, plans multi-day trips, and gives fleet managers real-time visibility into all driver logs.
 
