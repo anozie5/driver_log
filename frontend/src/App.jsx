@@ -1,13 +1,4 @@
-// // ─────────────────────────────────────────────────────────────
-// Root application shell.
-// Responsibilities:
-//   • Inject global styles
-//   • Auth gate (token check → profile load → redirect to AuthPage)
-//   • Sidebar navigation (role-aware)
-//   • Top bar
-//   • Page switcher (no router — state-based navigation)
-// ─────────────────────────────────────────────────────────────
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import "./styles/global.css";
 
 import { getToken, clearTokens, getProfile, getPendingCoDrivers } from "./api/client.js";
@@ -20,30 +11,44 @@ import TripPage        from "./pages/trips/TripPage.jsx";
 import ManagerPage     from "./pages/manager/ManagerPage.jsx";
 import ProfilePage     from "./pages/profile/ProfilePage.jsx";
 
+// ─── Module-level fetch helper ────────────────────────────────
+// Accepts all state setters as arguments so it lives outside the
+// component and has no closure over component state — zero
+// exhaustive-deps warnings, no stale references.
+function fetchUserData(setUser, setPendingCount, setAuthed) {
+  getProfile()
+    .then(u => {
+      setUser(u);
+      if (u.is_driver) {
+        getPendingCoDrivers()
+          .then(p => setPendingCount(p?.length || 0))
+          .catch(() => setPendingCount(0));
+      }
+    })
+    .catch(() => {
+      clearTokens();
+      setAuthed(false);
+    });
+}
+
 // ─────────────────────────────────────────────────────────────
 // App
 // ─────────────────────────────────────────────────────────────
 export default function App() {
-  const [authed, setAuthed]           = useState(!!getToken());
-  const [user, setUser]               = useState(null);
-  const [page, setPage]               = useState("logs");
+  const [authed, setAuthed]             = useState(!!getToken());
+  const [user, setUser]                 = useState(null);
+  const [page, setPage]                 = useState("logs");
   const [pendingCount, setPendingCount] = useState(0);
 
-  async function loadUser() {
-    try {
-      const u = await getProfile();
-      setUser(u);
-      if (u.is_driver) {
-        const p = await getPendingCoDrivers().catch(() => []);
-        setPendingCount(p?.length || 0);
-      }
-    } catch {
-      clearTokens();
-      setAuthed(false);
-    }
-  }
+  // Stable reference — setters never change identity between renders,
+  // so this useCallback dep array is truly stable and the linter is happy.
+  const loadUser = useCallback(() => {
+    fetchUserData(setUser, setPendingCount, setAuthed);
+  }, []);  // setUser / setPendingCount / setAuthed are stable React setter refs
 
-  useEffect(() => { if (authed) loadUser(); }, [authed]);
+  useEffect(() => {
+    if (authed) loadUser();
+  }, [authed, loadUser]);
 
   function logout() { clearTokens(); setAuthed(false); setUser(null); }
 
@@ -83,7 +88,7 @@ export default function App() {
       {/* Sidebar */}
       <aside className="sidebar">
         <div className="sb-logo">
-          <div className="sb-logo-mark">⬡ TruckLog</div>
+          <div className="sb-logo-mark">🚚 Anozie's TruckLog</div>
           <div className="sb-logo-sub">ELD System</div>
         </div>
         <nav className="sb-nav">

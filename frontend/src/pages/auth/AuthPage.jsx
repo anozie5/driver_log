@@ -46,7 +46,7 @@ export default function AuthPage({ onAuth }) {
       <div className="auth-bg" />
       <div className="auth-grid" />
       <div className="auth-card">
-        <div className="auth-logo">⬡ Anozie's TruckLog</div>
+        <div className="auth-logo">🚚 Anozie's TruckLog</div>
         <div className="auth-tagline">Electronic Driver Log System</div>
         <div className="auth-title">{mode === "login" ? "Sign In" : "Create Account"}</div>
 
