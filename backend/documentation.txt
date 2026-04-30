@@ -1,0 +1,911 @@
+================================================================================
+TRUCKLOG ELD SYSTEM — BACKEND TECHNICAL DOCUMENTATION
+================================================================================
+Version  : 1.0.0
+Stack    : Python 3.11+  |  Django 4.x  |  Django REST Framework  |  PostgreSQL
+Auth     : JWT via djangorestframework-simplejwt
+Map API  : OpenRouteService (ORS) — free tier, no billing required
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+TABLE OF CONTENTS
+────────────────────────────────────────────────────────────────────────────────
+  1.  Project Structure
+  2.  Application Overview
+  3.  authApi — Users & Authentication
+       3.1  Model: User
+       3.2  Serializers
+       3.3  Views & Endpoints
+       3.4  Validators
+  4.  logApi — Daily Driver Logs
+       4.1  Model: DayLog
+       4.2  Model: ActLog
+       4.3  Serializers
+       4.4  Utils & Business Logic
+       4.5  Signals & Automatic Totals Sync
+       4.6  Exceptions
+       4.7  Views & Endpoints
+  5.  tripApi — Trip Planner
+       5.1  Model: Trip
+       5.2  Model: TripStop
+       5.3  Model: TripDayLog
+       5.4  HOS Rules Engine (hos.py)
+       5.5  Planner Orchestrator (planner.py)
+       5.6  Serializers
+       5.7  Views & Endpoints
+  6.  URL Configuration
+  7.  Authentication & Permissions
+  8.  Data Flow Diagrams
+  9.  Error Handling Reference
+ 10.  Environment & Settings Reference
+ 11.  Database Indexes & Constraints
+ 12.  Running Tests
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. PROJECT STRUCTURE
+────────────────────────────────────────────────────────────────────────────────
+
+  backend/
+  ├── backend/                  ← Django project package
+  │   ├── settings.py
+  │   ├── urls.py               ← Root URL dispatcher
+  │   └── wsgi.py / asgi.py
+  ├── authApi/                  ← User management & JWT auth
+  │   ├── models.py             ← Custom User model
+  │   ├── serializers.py        ← SignUp, LogIn, Profile, PasswordReset, EmailChange
+  │   ├── validators.py         ← PasswordComplexityValidator, CustomCommonPasswordValidator
+  │   ├── views.py              ← SignUpView, LogInView, UserProfileView, etc.
+  │   └── urls.py
+  ├── logApi/                   ← ELD daily logs & activity tracking
+  │   ├── models.py             ← DayLog, ActLog
+  │   ├── serializers.py        ← DayLogListSerializer, DayLogDetailSerializer, ActLogSerializer
+  │   ├── utils.py              ← Business logic, totals recompute, co-driver helpers
+  │   ├── signals.py            ← post_save / post_delete hooks on ActLog → recompute totals
+  │   ├── apps.py               ← AppConfig wiring signals via ready()
+  │   ├── exceptions.py         ← TimeRangeOverlapError, InvalidTimeRangeError, PermissionDeniedError
+  │   ├── views.py              ← DayLog CRUD, ActLog CRUD, co-driver workflow, manager overview
+  │   └── urls.py
+  └── tripApi/                  ← Trip planning & HOS schedule generation
+      ├── models.py             ← Trip, TripStop, TripDayLog
+      ├── hos.py                ← Pure-Python FMCSA HOS rules engine
+      ├── planner.py            ← Geocoding + routing + HOS → ELD log builder
+      ├── serializers.py        ← TripCreateSerializer, TripDetailSerializer, etc.
+      ├── views.py              ← TripListView, TripDetailView
+      ├── apps.py
+      ├── urls.py
+      └── tests/
+          └── test_hos.py       ← 22 pure-Python HOS unit tests (no DB required)
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. APPLICATION OVERVIEW
+────────────────────────────────────────────────────────────────────────────────
+
+TruckLog is an Electronic Logging Device (ELD) system for FMCSA-regulated
+property-carrying truck drivers. It replaces the paper "Drivers Daily Log"
+(24-hour grid form) with a digital equivalent that:
+
+  • Enforces HOS (Hours of Service) rules at the data layer.
+  • Automatically syncs hour totals whenever activity segments are modified.
+  • Supports a co-driver workflow with approval gating.
+  • Plans full multi-day trips, inserting required HOS breaks, fuel stops,
+    and pickup/dropoff on-duty time, then generates the ELD logs automatically.
+  • Gives managers read-only visibility into all drivers' logs across any time
+    period (day / week / month / year).
+
+User roles:
+  • Driver    — can create/view their own DayLogs, plan trips, participate in
+                the co-driver workflow.
+  • Manager   — read-only across all drivers; can view and filter any driver's
+                logs. Cannot create logs for themselves (not a driver).
+  • Both roles are mutually exclusive (enforced at signup and profile update).
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. authApi — USERS & AUTHENTICATION
+────────────────────────────────────────────────────────────────────────────────
+
+3.1  MODEL: User
+─────────────────
+  Extends AbstractUser.  USERNAME_FIELD = 'email'.
+
+  Field               Type            Notes
+  ──────────────────  ──────────────  ─────────────────────────────────────
+  email               EmailField      unique=True, used as login identifier
+  username            CharField(150)  unique=True, case-insensitive at validation
+  first_name          CharField(30)   optional
+  last_name           CharField(30)   optional
+  designation_number  CharField(20)   driver badge / employee ID, unique if set
+  is_driver           BooleanField    default False
+  is_manager          BooleanField    default False
+
+  Business rule: is_driver and is_manager cannot both be True.
+
+
+3.2  SERIALIZERS
+─────────────────
+
+  SignUpSerializer
+    Fields  : email, username, password, confirm_password, first_name,
+              last_name, designation_number, is_driver, is_manager, signup_code
+    Validates:
+      - password against Django AUTH_PASSWORD_VALIDATORS + PasswordComplexityValidator
+        + CustomCommonPasswordValidator
+      - signup_code against settings.code (server-side registration gate)
+      - passwords match
+      - username unique (case-insensitive)
+      - full name combination unique
+      - designation_number unique (case-insensitive)
+      - cannot be both is_driver and is_manager
+    create(): pops confirm_password + signup_code, calls user.set_password()
+
+  LogInSerializer (extends TokenObtainPairSerializer)
+    Fields  : email, password
+    Validates: case-insensitive email lookup, password check
+    get_token(): embeds email claim in JWT payload
+    Returns : access token, refresh token, email
+
+  UserProfileSerializer
+    Fields      : email (read-only), username, first_name, last_name,
+                  designation_number, is_driver, is_manager
+    Validates   : same uniqueness rules as signup, excludes current user from
+                  duplicate checks on update
+    update()    : blocks email changes (must use EmailChangeSerializer)
+
+  PasswordResetSerializer
+    Fields  : new_password, confirm_password
+    Validates: password complexity + letter + symbol requirement + match
+
+  EmailChangeSerializer
+    Fields  : current_password, new_email
+    Validates: current password correct, new email different + not already used
+    Context : requires request (to access request.user)
+
+
+3.3  VIEWS & ENDPOINTS
+────────────────────────
+
+  Base path: /auth/
+
+  POST   /auth/signup/           SignUpView
+    Body    : { email, username, password, confirm_password, first_name,
+                last_name, designation_number, is_driver, is_manager, signup_code }
+    Response: 201 { message, user_id }
+    Errors  : 400 with field-level detail
+
+  POST   /auth/login/            LogInView
+    Body    : { email, password }
+    Response: 200 { refresh, access, email }
+    Errors  : 400 "Incorrect details."
+
+  GET    /auth/profile/          UserProfileView     [IsAuthenticated]
+    Response: 200 { email, username, first_name, last_name,
+                    designation_number, is_driver, is_manager }
+
+  PATCH  /auth/profile/          UserProfileView     [IsAuthenticated]
+    Body    : any subset of profile fields (partial=True)
+    Response: 200 { message, data }
+
+  POST   /auth/password-reset/   PasswordResetView   [IsAuthenticated]
+    Body    : { new_password, confirm_password }
+    Response: 200 { message }
+
+  POST   /auth/change-email/     EmailChangeView     [IsAuthenticated]
+    Body    : { current_password, new_email }
+    Response: 200 { message }
+
+
+3.4  VALIDATORS
+────────────────
+  PasswordComplexityValidator
+    Requires at least one uppercase, one lowercase, one digit, one symbol.
+
+  CustomCommonPasswordValidator
+    Rejects passwords appearing in a custom deny-list of common passwords.
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. logApi — DAILY DRIVER LOGS
+────────────────────────────────────────────────────────────────────────────────
+
+4.1  MODEL: DayLog
+────────────────────
+  One log per driver per calendar day.
+  Maps to the paper "Drivers Daily Log" form.
+  Constraint: unique_together = ('user', 'day')
+
+  Category            Field                     Type / Default
+  ──────────────────  ────────────────────────  ──────────────────────────────
+  Identity            user (FK → User)          CASCADE, limit is_driver=True
+                      day                       DateField
+  Header (form top)   from_location             TextField
+                      to_location               TextField
+                      vehicle_number            CharField(50), blank
+                      carrier_name              CharField(255), blank
+                      main_office_address       TextField, blank
+                      home_terminal_address     TextField, blank
+  Totals (auto-sync)  total_miles_driven        Decimal(10,2) default 0.00
+                      total_mileage             Decimal(10,2) default 0.00
+                      total_hours_driving       Decimal(5,2)  default 0.00
+                      total_hours_on_duty       Decimal(5,2)  default 0.00
+                      total_hours_off_duty      Decimal(5,2)  default 0.00
+                      total_hours_sleeping      Decimal(5,2)  default 0.00
+  Remarks / Docs      remarks                   TextField, blank
+                      shipping_documents        TextField, blank
+                      dvl_or_manifest_no        CharField(100), blank
+                      shipper_commodity         CharField(255), blank
+  Co-driver           co_driver (FK → User)     SET_NULL, nullable
+                      co_driver_miles_driven    Decimal(10,2) default 0.00
+                      is_co_driver_entry        BooleanField  default False
+                      linked_primary_log (FK→self) SET_NULL, nullable
+                      co_driver_approved        BooleanField  null=True
+                                                  None=pending, True=approved,
+                                                  False=rejected
+  Timestamps          created_at                auto_now_add
+                      updated_at                auto_now
+
+  Indexes: (user), (user, day), (day)
+
+
+4.2  MODEL: ActLog
+────────────────────
+  One activity segment within a DayLog.
+  Maps to one coloured band on the 24-hour grid.
+
+  Field           Type                    Notes
+  ──────────────  ──────────────────────  ──────────────────────────────────
+  day_log         FK → DayLog             CASCADE, related_name='act_logs'
+  activity        CharField(2) choices    D=Driving, ON=On Duty, OF=Off Duty,
+                                          SB=Sleeper Berth
+  start_time      DateTimeField           must be on 15-min boundary
+  end_time        DateTimeField           must be on 15-min boundary, > start
+  location        TextField               blank
+  remarks         TextField               blank
+
+  Constraints:
+    • DB-level CHECK:  start_time < end_time  (name: actlog_start_before_end)
+    • unique_together: (day_log, start_time, end_time)
+    • Application-level overlap check in clean():
+        no two ActLogs for the same DayLog may have overlapping time ranges
+    • full_clean() called from save() — validation fires on every write
+
+  Indexes: (day_log), (day_log, start_time)
+
+
+4.3  SERIALIZERS
+─────────────────
+
+  ActLogSerializer
+    Fields  : id, day_log, activity, activity_display (read-only),
+              start_time, end_time, duration_hours (computed), location, remarks
+    Validates: 15-min boundary on both times, start < end
+    create(): delegates to utils.create_act_log()
+    update(): delegates to utils.update_act_log()
+
+  DayLogListSerializer  (compact — no act_logs embedded)
+    Fields  : id, day, driver_email, driver_name, co_driver_email,
+              co_driver_name, co_driver_approval_status,
+              from_location, to_location, vehicle_number,
+              total_miles_driven, total_hours_*,
+              is_co_driver_entry, co_driver_approved
+    co_driver_approval_status: derived field → 'pending' | 'approved' |
+                                                'rejected' | null
+
+  DayLogDetailSerializer  (full — act_logs embedded)
+    All DayLogListSerializer fields plus:
+      act_logs (nested ActLogSerializer, read-only)
+      all header + totals + remarks fields
+      co_driver_id (write-only PK for setting co-driver on creation)
+      linked_primary_log_id (write-only PK)
+      created_at, updated_at
+    create(): injects request.user as the owner
+    update(): strips user field to prevent ownership transfer
+
+  CoDriverApprovalSerializer
+    Fields  : co_driver_log_id (int), approve (bool)
+    Used by : PATCH /log/logs/<primary_log_id>/approve-co-driver/
+
+
+4.4  UTILS & BUSINESS LOGIC
+─────────────────────────────
+
+  validate_15_minute_interval(dt)
+    Raises InvalidTimeRangeError if dt.minute not in {0, 15, 30, 45}
+    or dt.second / dt.microsecond != 0.
+
+  validate_act_times(start, end)
+    Calls validate_15_minute_interval on both, then checks start < end.
+
+  get_or_create_day_log(user, date_obj) → (DayLog, created)
+    Scoped to user — never returns another driver's log.
+
+  create_act_log(day_log, activity, start_time, end_time, location, remarks)
+    Atomic.  Calls validate_act_times → ActLog.full_clean() → ActLog.save().
+    Translates DjangoValidationError → DRF exception (TimeRangeOverlapError
+    or InvalidTimeRangeError).
+
+  update_act_log(act, activity, start_time, end_time, location, remarks)
+    Atomic.  Updates only supplied (non-None) fields, then re-validates.
+
+  submit_co_driver_link(co_driver_log, primary_log)
+    Verifies same day, sets is_co_driver_entry=True, linked_primary_log,
+    co_driver_approved=None.  Single update_fields save.
+
+  approve_co_driver_log(primary_log, co_driver_log, approve: bool)
+    Verifies co_driver_log.linked_primary_log == primary_log (raises
+    PermissionDeniedError if not).  Sets co_driver_approved.  If True,
+    also sets primary_log.co_driver = co_driver_log.user.
+
+  recompute_day_log_totals(day_log: DayLog)
+    Reads all ActLog rows for the DayLog, sums durations per activity type:
+      D  → total_hours_driving
+      ON → total_hours_on_duty
+      OF → total_hours_off_duty
+      SB → total_hours_sleeping
+    Issues a single DayLog.objects.filter(pk=...).update(**totals) — does NOT
+    call DayLog.save(), so auto_now and DayLog signals are not triggered.
+
+  recompute_all_day_log_totals() → int
+    Backfill utility.  Iterates all DayLog rows in chunks of 500.
+    Returns count of logs processed.  Use from the Django shell after
+    data migrations.
+
+
+4.5  SIGNALS & AUTOMATIC TOTALS SYNC
+──────────────────────────────────────
+  File: logApi/signals.py
+  Wired in: logApi/apps.py → LogApiConfig.ready()
+
+  @receiver(post_save, sender=ActLog)   → recompute_day_log_totals(instance.day_log)
+  @receiver(post_delete, sender=ActLog) → recompute_day_log_totals(instance.day_log)
+
+  Result: whenever an ActLog is created, edited, or deleted, the parent
+  DayLog's totals are immediately recalculated and persisted in a single
+  UPDATE query.  The API response always reflects current totals.
+
+  Why signals and not async tasks:
+    The recompute is a single SELECT + single UPDATE taking microseconds.
+    Async task queues (Celery + Redis) add infrastructure cost with no
+    benefit for work this cheap.  Totals must be consistent before the API
+    responds.  Async tasks are appropriate for slow work: PDF generation,
+    email delivery, bulk aggregations.
+
+
+4.6  EXCEPTIONS
+────────────────
+  All exceptions extend rest_framework.exceptions.APIException.
+
+  Class                   HTTP Status  Code
+  ──────────────────────  ───────────  ──────────────────────
+  TimeRangeOverlapError   409          time_range_overlap
+  InvalidTimeRangeError   400          invalid_time_range
+  PermissionDeniedError   403          permission_denied
+
+
+4.7  VIEWS & ENDPOINTS
+────────────────────────
+
+  Base path: /log/
+  All endpoints require IsAuthenticated.
+
+  ── DayLog ──────────────────────────────────────────────────────────────────
+
+  GET  /log/logs/
+    Drivers  → own logs only.
+    Managers → all logs (filter: ?driver_id=<pk>).
+    Query params (all optional, mutually exclusive):
+      period    = today | this_week | this_month | this_year
+      date      = YYYY-MM-DD
+      week      = <ISO week number>  (use with &year=)
+      month     = <1–12>            (use with &year=)
+      year      = <YYYY>
+    Response: 200  [ DayLogListSerializer, … ]
+
+  POST /log/logs/
+    Drivers  → creates for themselves.
+    Managers → creates for a driver if ?user_id=<pk> in body.
+    Returns 409 if a log already exists for (user, day).
+    Response: 201  DayLogDetailSerializer
+
+  GET    /log/logs/<pk>/         DayLogDetailView
+    Owner or manager only.
+    Response: 200  DayLogDetailSerializer  (includes act_logs array)
+
+  PATCH  /log/logs/<pk>/
+    Partial update of header / totals fields.
+    Response: 200  DayLogDetailSerializer
+
+  DELETE /log/logs/<pk>/
+    Cascades to all ActLogs (DB cascade).
+    Response: 204
+
+  ── Co-driver workflow ──────────────────────────────────────────────────────
+
+  POST   /log/logs/<co_log_pk>/submit-co-driver/   CoDriverSubmitView
+    Co-driver submits their log for approval.
+    Body    : { "primary_log_id": <int> }
+    Validates: both logs must share the same day.
+    Sets    : is_co_driver_entry=True, linked_primary_log, co_driver_approved=null
+    Response: 200  { detail, co_driver_log_id, primary_log_id, status }
+
+  PATCH  /log/logs/<primary_log_pk>/approve-co-driver/   CoDriverApprovalView
+    Main driver approves or rejects a submission.
+    Body    : { "co_driver_log_id": <int>, "approve": true|false }
+    On True : primary_log.co_driver is set to co_driver_log.user
+    Response: 200  { detail, co_driver_log_id, primary_log_id, approve }
+    Errors  : 403 if co_driver_log.linked_primary_log != primary_log
+
+  GET    /log/logs/pending-co-drivers/   PendingCoDriverView
+    Returns all co-driver submissions where linked_primary_log.user ==
+    request.user and co_driver_approved IS NULL.
+    Response: 200  [ DayLogListSerializer, … ]
+
+  ── ActLog ──────────────────────────────────────────────────────────────────
+
+  GET  /log/logs/<day_log_id>/acts/    ActLogListView
+    All acts for a DayLog. Owner or manager.
+    Response: 200  [ ActLogSerializer, … ]
+
+  POST /log/logs/<day_log_id>/acts/
+    Body    : { activity, start_time, end_time, location, remarks }
+    Times must be ISO 8601 UTC on 15-min boundary.
+    Validates overlap, start < end.
+    Response: 201  ActLogSerializer
+    Errors  : 400 invalid time | 409 overlap
+
+  GET    /log/acts/<pk>/    ActLogDetailView
+    Owner or manager.
+    Response: 200  ActLogSerializer
+
+  PATCH  /log/acts/<pk>/
+    Partial update.  Re-runs all validation.
+    Response: 200  ActLogSerializer
+
+  DELETE /log/acts/<pk>/
+    Response: 204
+
+  ── Manager ─────────────────────────────────────────────────────────────────
+
+  GET  /log/managers/drivers/    DriverOverviewView    [Manager only]
+    Response: 200  [ { id, email, name, designation_number, total_logs }, … ]
+
+  GET  /log/managers/drivers/<driver_id>/logs/    DriverOverviewView
+    Same period / date query params as /log/logs/.
+    Response: 200  [ DayLogListSerializer, … ]
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. tripApi — TRIP PLANNER
+────────────────────────────────────────────────────────────────────────────────
+
+5.1  MODEL: Trip
+──────────────────
+  Field                 Type                    Notes
+  ────────────────────  ──────────────────────  ──────────────────────────────
+  driver (FK → User)    CASCADE                 limit is_driver=True
+  current_location      CharField(255)           free-text address
+  pickup_location       CharField(255)
+  dropoff_location      CharField(255)
+  current_cycle_used    Decimal(5,2)            hours in 70hr/8-day cycle
+  departure_time        DateTimeField           when the driver departs
+  status                CharField               pending | computed | failed
+  error_message         TextField               populated on failure
+  route_geojson         JSONField               ORS GeoJSON LineString
+  total_distance_miles  Decimal(10,2)           computed by planner
+  total_driving_hours   Decimal(8,2)            computed by planner
+  created_at            auto_now_add
+  updated_at            auto_now
+  ordering: -created_at
+
+
+5.2  MODEL: TripStop
+──────────────────────
+  One waypoint in the computed route.
+
+  Field             Type              Notes
+  ───────────────── ───────────────── ─────────────────────────────────
+  trip (FK → Trip)  CASCADE
+  sequence          PositiveIntField  ordering within trip, unique per trip
+  stop_type         CharField(20)     start | pickup | fuel | rest_break |
+                                      sleeper_break | dropoff
+  location          CharField(255)
+  latitude          FloatField        nullable for interpolated stops
+  longitude         FloatField        nullable
+  miles_from_prev   Decimal(10,2)     miles from previous stop
+  cumulative_miles  Decimal(10,2)     miles from trip start
+  arrival_time      DateTimeField     nullable
+  departure_time    DateTimeField     nullable
+  duration_hours    Decimal(5,2)      time spent at this stop
+  notes             TextField
+
+  unique_together: (trip, sequence)
+
+
+5.3  MODEL: TripDayLog
+────────────────────────
+  Junction between Trip and DayLog.
+  A multi-day trip produces one DayLog per calendar day.
+
+  trip (FK → Trip), day_log (FK → logApi.DayLog), day_number (1-based int)
+  unique_together: (trip, day_log)
+
+
+5.4  HOS RULES ENGINE  (tripApi/hos.py)
+──────────────────────────────────────────
+  Pure Python — zero Django dependencies.  Can be unit-tested standalone.
+
+  FMCSA constants applied:
+    MAX_DRIVING_HOURS     = 11.0 hrs   (per shift)
+    MAX_ON_DUTY_WINDOW    = 14.0 hrs   (per shift window)
+    REQUIRED_BREAK_AFTER  =  8.0 hrs   (driving before mandatory 30-min break)
+    REQUIRED_BREAK_MINS   =  0.5 hrs   (30-minute break duration)
+    OFF_DUTY_RESET        = 10.0 hrs   (sleeper berth resets shift)
+    CYCLE_LIMIT           = 70.0 hrs   (rolling 8-day cycle)
+    FUEL_INTERVAL_MILES   = 1000.0 mi  (max between fuel stops)
+    PICKUP_HOURS          =  1.0 hrs   (on-duty time at pickup)
+    DROPOFF_HOURS         =  1.0 hrs   (on-duty time at dropoff)
+    AVERAGE_SPEED_MPH     = 55.0 mph   (assumed speed)
+
+  Data structures:
+    HOSState   — mutable state carried forward (driving_since_break,
+                 shift_driving, shift_on_duty, shift_start, cycle_hours_used)
+    Segment    — one activity block that becomes an ActLog row
+                 (activity, start, end, location, notes)
+    PlannedStop — one TripStop-to-be (sequence, stop_type, location,
+                  coords, miles, arrival, departure, duration, notes)
+
+  plan_trip(total_miles, segment_miles, segment_locations, segment_coords,
+            departure, cycle_hours_used) → (stops, segments)
+
+    Internal _drive_leg() iterates mile by mile applying rules in priority:
+      1. Cycle exhausted → raises ValueError (trip uncompletable)
+      2. 14-hr window full → 10-hr sleeper reset
+      3. 11-hr driving limit → 10-hr sleeper reset
+      4. 8-hr break threshold → 30-min off-duty break
+      5. Fuel interval → 30-min on-duty fuel stop
+    Each iteration drives min(HOS-allowed miles, miles-until-fuel, miles-left).
+
+
+5.5  PLANNER ORCHESTRATOR  (tripApi/planner.py)
+─────────────────────────────────────────────────
+  execute_trip_plan(trip_id: int) → Trip
+
+  Wrapped in @transaction.atomic.  Steps:
+
+    1. geocode(address) → (lat, lon)
+       Calls ORS /geocode/search.  Raises RuntimeError if unresolvable.
+
+    2. get_route(coords) → ORS GeoJSON response
+       Calls ORS /v2/directions/driving-hgv/geojson with up to 3 waypoints.
+       Uses driving-hgv profile (truck-appropriate routing: bridge heights,
+       weight limits).
+
+    3. extract_leg_distances(route_json) → (leg_miles_list, total_miles, feature)
+       Converts ORS metres to miles.  Expects 2 legs (current→pickup,
+       pickup→dropoff).
+
+    4. plan_trip() → (stops, segments)
+       HOS engine call.
+
+    5. TripStop.objects.bulk_create(stop_objs)
+       Clears prior stops first (supports replan).
+
+    6. _build_eld_logs(driver, segments, trip, from_location, to_location)
+       Groups segments by date → DayLog.get_or_create() per day →
+       ActLog.create() per segment.
+       Snaps times to 15-min boundaries with _round_to_quarter().
+       Skips segments that would overlap existing ActLogs (safe for replan).
+
+    7. TripDayLog.objects.bulk_create(trip_day_log_objs)
+
+    8. Updates Trip.status = 'computed' + route_geojson + distances.
+
+  On any exception: Trip.status = 'failed', error_message set, re-raises.
+
+
+5.6  SERIALIZERS
+─────────────────
+  TripCreateSerializer
+    Fields  : current_location, pickup_location, dropoff_location,
+              current_cycle_used, departure_time
+    Validates: cycle_used in [0, 70], departure not in the past
+    create(): injects request.user as driver
+
+  TripListSerializer     (compact list view)
+    Fields  : id, driver_email, current_location, pickup_location,
+              dropoff_location, departure_time, status, status_display,
+              total_distance_miles, total_driving_hours, created_at
+
+  TripDetailSerializer   (full — stops + day_logs embedded)
+    All list fields plus: stops (TripStopSerializer), day_logs (TripDayLogSerializer),
+    route_geojson, error_message, updated_at
+
+  TripStopSerializer
+    All TripStop fields + stop_type_display
+
+  TripDayLogSerializer
+    day_number + nested DayLogDetailSerializer
+
+
+5.7  VIEWS & ENDPOINTS
+────────────────────────
+
+  Base path: /trip/
+  All endpoints require IsAuthenticated.
+
+  GET  /trip/trips/    TripListView
+    Drivers  → own trips.
+    Managers → all trips (filter: ?driver_id=<pk>).
+    Response: 200  [ TripListSerializer, … ]
+
+  POST /trip/trips/
+    Drivers only.
+    Body    : { current_location, pickup_location, dropoff_location,
+                current_cycle_used, departure_time }
+    Runs execute_trip_plan() synchronously.
+    Response: 201  TripDetailSerializer
+    Errors  : 422 { detail, error, trip_id } on planning failure
+
+  GET    /trip/trips/<pk>/    TripDetailView
+    Owner or manager.
+    Response: 200  TripDetailSerializer
+
+  DELETE /trip/trips/<pk>/
+    Deletes Trip + TripStops + TripDayLog links.
+    Does NOT delete the underlying DayLogs (they belong to the driver).
+    Response: 204
+
+  POST   /trip/trips/<pk>/replan/    TripDetailView
+    Re-runs the planner for an existing trip.
+    Clears prior TripStops and TripDayLog rows, rebuilds from scratch.
+    Response: 200  TripDetailSerializer
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. URL CONFIGURATION
+────────────────────────────────────────────────────────────────────────────────
+
+  Root (backend/urls.py):
+    /user-admin/     → Django Admin
+    /auth/           → authApi.urls
+    /log/            → logApi.urls
+    /trip/           → tripApi.urls
+
+  authApi/urls.py:
+    signup/            POST
+    login/             POST
+    profile/           GET, PATCH
+    password-reset/    POST
+    change-email/      POST
+
+  logApi/urls.py:
+    logs/                                    GET, POST
+    logs/<pk>/                               GET, PATCH, DELETE
+    logs/<pk>/submit-co-driver/              POST
+    logs/<pk>/approve-co-driver/             PATCH
+    logs/pending-co-drivers/                 GET
+    logs/<day_log_id>/acts/                  GET, POST
+    acts/<pk>/                               GET, PATCH, DELETE
+    managers/drivers/                        GET
+    managers/drivers/<driver_id>/logs/       GET
+
+  tripApi/urls.py:
+    trips/                                   GET, POST
+    trips/<pk>/                              GET, DELETE
+    trips/<pk>/replan/                       POST
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. AUTHENTICATION & PERMISSIONS
+────────────────────────────────────────────────────────────────────────────────
+
+  Mechanism: JWT Bearer tokens (djangorestframework-simplejwt)
+
+  Token lifecycle:
+    POST /auth/login/ → { access, refresh }
+    All subsequent requests: Authorization: Bearer <access>
+    Refresh: POST to simplejwt's /auth/token/refresh/ with { refresh }
+
+  Permission model:
+    • No endpoint is publicly accessible except /auth/signup/ and /auth/login/.
+    • All logApi and tripApi endpoints declare permission_classes=[IsAuthenticated].
+    • Driver-only routes return 403 if the user is not is_driver.
+    • Manager-only routes return 403 if the user is not is_manager or is_staff.
+    • Ownership enforcement: drivers can only read/write their own logs and trips.
+      Managers can read any driver's data.
+    • Co-driver approval: only the owner of the primary log can approve/reject.
+
+
+────────────────────────────────────────────────────────────────────────────────
+8. DATA FLOW DIAGRAMS
+────────────────────────────────────────────────────────────────────────────────
+
+  8a. Activity Log Write → Totals Sync
+
+    Client POST /log/logs/<id>/acts/
+        │
+        ▼
+    ActLogListView.post()
+        │ validates (15-min, overlap)
+        ▼
+    ActLog.save()
+        │ calls full_clean() → overlap check → DB INSERT
+        ▼
+    Django post_save signal fires
+        │
+        ▼
+    recompute_day_log_totals(day_log)
+        │ SELECT act_logs WHERE day_log=X
+        │ sum durations per activity type
+        ▼
+    DayLog.objects.filter(pk=X).update(totals…)
+        │
+        ▼
+    Client receives 201 with correct parent totals on next GET
+
+
+  8b. Trip Planning Pipeline
+
+    Client POST /trip/trips/
+        │
+        ▼
+    TripListView.post()
+        │ creates Trip record (status=pending)
+        ▼
+    execute_trip_plan(trip_id)   ← atomic
+        ├── geocode(current_location)     → ORS API
+        ├── geocode(pickup_location)      → ORS API
+        ├── geocode(dropoff_location)     → ORS API
+        ├── get_route([coords])           → ORS API  (driving-hgv)
+        ├── extract_leg_distances()
+        ├── plan_trip()                   ← hos.py  (pure Python)
+        │     returns (stops, segments)
+        ├── TripStop.bulk_create()
+        ├── _build_eld_logs()
+        │     └── per day: DayLog.get_or_create()
+        │                  ActLog.create() × N
+        │                  → signals fire → totals recomputed
+        ├── TripDayLog.bulk_create()
+        └── Trip.update(status=computed, geojson, distances)
+        │
+        ▼
+    Client receives 201  TripDetailSerializer
+        (stops timeline + ELD day logs with 24-hr grid data)
+
+
+  8c. Co-driver Workflow
+
+    Co-driver fills their own DayLog (same day as main driver)
+        │
+        ▼
+    POST /log/logs/<co_log_id>/submit-co-driver/
+        Body: { primary_log_id }
+        Sets: is_co_driver_entry=True, linked_primary_log, approved=null
+        │
+        ▼
+    Main driver checks GET /log/logs/pending-co-drivers/
+        │
+        ▼
+    Main driver reviews co-driver's log detail (GET /log/logs/<co_log_id>/)
+        │
+        ▼
+    PATCH /log/logs/<primary_log_id>/approve-co-driver/
+        Body: { co_driver_log_id, approve: true }
+        Sets: co_driver_approved=true
+              primary_log.co_driver = co_driver_log.user
+
+
+────────────────────────────────────────────────────────────────────────────────
+9. ERROR HANDLING REFERENCE
+────────────────────────────────────────────────────────────────────────────────
+
+  HTTP   Meaning                         When
+  ─────  ─────────────────────────────── ────────────────────────────────────
+  200    OK                              Successful GET, PATCH
+  201    Created                         POST created resource
+  204    No Content                      DELETE succeeded
+  400    Bad Request                     Validation failure (field-level errors)
+  401    Unauthorized                    Missing or invalid JWT
+  403    Forbidden                       Authenticated but wrong role/ownership
+  404    Not Found                       Resource doesn't exist (or forbidden —
+                                         ownership 404s are intentional to avoid
+                                         resource enumeration)
+  409    Conflict                        Duplicate (user, day) log;
+                                         overlapping ActLog time range
+  422    Unprocessable Entity            Trip planning failed (geocoding error,
+                                         routing error, or cycle exhausted)
+
+  Error response shape (validation):
+    { "field_name": ["error message"], … }
+    or { "detail": "error message" }
+    or { "detail": "…", "code": "time_range_overlap" }
+
+
+────────────────────────────────────────────────────────────────────────────────
+10. ENVIRONMENT & SETTINGS REFERENCE
+────────────────────────────────────────────────────────────────────────────────
+
+  Required settings.py entries:
+
+    SECRET_KEY          Django secret key
+    DEBUG               False in production
+    ALLOWED_HOSTS       ['*'] in dev, specific hosts in production
+
+    INSTALLED_APPS      Must include:
+                          'rest_framework'
+                          'rest_framework_simplejwt'
+                          'authApi'
+                          'logApi.apps.LogApiConfig'   ← must use AppConfig
+                          'tripApi.apps.TripApiConfig'
+
+    DATABASES           PostgreSQL (required for CheckConstraint support)
+                          ENGINE: django.db.backends.postgresql
+
+    AUTH_USER_MODEL     'authApi.User'
+
+    REST_FRAMEWORK      DEFAULT_AUTHENTICATION_CLASSES:
+                          rest_framework_simplejwt.authentication.JWTAuthentication
+
+    code                Server-side signup gate code (string)
+                        e.g.  code = os.environ.get('SIGNUP_CODE', 'changeme')
+
+    ORS_API_KEY         OpenRouteService API key (free at openrouteservice.org)
+                        e.g.  ORS_API_KEY = os.environ.get('ORS_API_KEY', '')
+
+    AUTH_PASSWORD_VALIDATORS
+                        Include Django's built-in validators + your custom ones.
+
+  Recommended environment variables (.env):
+    SECRET_KEY
+    DATABASE_URL
+    SIGNUP_CODE
+    ORS_API_KEY
+    DEBUG
+
+
+────────────────────────────────────────────────────────────────────────────────
+11. DATABASE INDEXES & CONSTRAINTS
+────────────────────────────────────────────────────────────────────────────────
+
+  Table           Index / Constraint
+  ──────────────  ─────────────────────────────────────────────────────────
+  authApi_user    UNIQUE email, UNIQUE username
+  logApi_daylog   UNIQUE (user_id, day)
+                  INDEX (user_id)
+                  INDEX (user_id, day)
+                  INDEX (day)
+  logApi_actlog   CHECK start_time < end_time  [actlog_start_before_end]
+                  UNIQUE (day_log_id, start_time, end_time)
+                  INDEX (day_log_id)
+                  INDEX (day_log_id, start_time)
+  tripApi_trip    INDEX (driver_id) — implicit via FK
+  tripApi_tripstop UNIQUE (trip_id, sequence)
+
+
+────────────────────────────────────────────────────────────────────────────────
+12. RUNNING TESTS
+────────────────────────────────────────────────────────────────────────────────
+
+  HOS engine unit tests (no DB, no Django, no API keys):
+    pip install pytest
+    pytest tripApi/tests/test_hos.py -v
+
+  Test coverage (22 tests):
+    • Basic structure: start/pickup/dropoff stops present, chronological order
+    • 30-min break: inserted after 8 hrs driving, never exceeds 8-hr accumulator
+    • 11-hr limit: shift driving never exceeds 11 hrs
+    • 14-hr window: on-duty hours never exceed 14 hrs per window
+    • 10-hr reset: sleeper stops have correct duration, multi-day trips include them
+    • Fuel stops: inserted at ≤ 1,000-mile intervals, not present on short trips
+    • Pickup/dropoff: exist, 1-hr duration, produce ON-DUTY segments
+    • Cycle: trip raises ValueError when cycle_hours_used ≥ remaining needed
+    • Ordering: stops in sequence, start is first, dropoff is last
+
+  Django tests (requires DB):
+    python manage.py test
+
+================================================================================
+END OF BACKEND DOCUMENTATION
+================================================================================
