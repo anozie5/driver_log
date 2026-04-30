@@ -151,7 +151,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         """
         Validate that the designation number is unique if provided.
         """
-        if value and User.objects.filter(designation_number__iexact=value).exists():
+        if value and User.objects.filter(designation_number__iexact=value).exclude(pk=self.instance.pk).exists():
             raise serializers.ValidationError("This designation number is already in use.")
         return value
     
@@ -159,7 +159,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         """
         Validate that the username is unique.
         """
-        if User.objects.filter(username__iexact=value).exists():
+        if User.objects.filter(username__iexact=value).exclude(pk=self.instance.pk).exists():
             raise serializers.ValidationError("This username is not available.")
         return value
     
