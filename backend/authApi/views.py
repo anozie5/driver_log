@@ -1,26 +1,29 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
+from rest_framework import status, generics
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from authApi.serializers import *
+from django.db import transaction
 
-class SignUpView(APIView):
+class SignUpView(generics.CreateAPIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
+    queryset = User.objects.all()
+    serializer_class = SignUpSerializer
 
-    def post(self, request, *args, **kwargs):
-        serializer = SignUpSerializer(data=request.data)
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
 
-        if serializer.is_valid():
+        with transaction.atomic():
             user = serializer.save()
             return Response({
                 "message": "User created successfully.",
-                "user_id": user.id
             }, status=status.HTTP_201_CREATED)
-
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 class LogInView(APIView):
+    authentication_classes = []
     permission_classes = [AllowAny]
 
     def post(self, request):
