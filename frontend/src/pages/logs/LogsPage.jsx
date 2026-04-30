@@ -154,10 +154,152 @@ export function ApprovalBadge({ status }) {
 }
 
 // ─────────────────────────────────────────────────────────────
+// DriverLogPicker — shared by LogDetailModal and CoDriverPage
+//
+// Lets a driver search for another driver by name / email /
+// designation number, then pick one of their logs from a
+// dropdown. Calls onPick(primaryLogId) when a log is chosen.
+// ─────────────────────────────────────────────────────────────
+export function DriverLogPicker({ forDay, onPick }) {
+  const [search, setSearch]           = useState("");
+  const [results, setResults]         = useState([]);
+  const [searching, setSearching]     = useState(false);
+  const [selectedDriver, setSelectedDriver] = useState(null);
+  const [driverLogs, setDriverLogs]   = useState([]);
+  const [loadingLogs, setLoadingLogs] = useState(false);
+
+  function handleSearch(e) {
+    const val = e.target.value;
+    setSearch(val);
+    setSelectedDriver(null);
+    setDriverLogs([]);
+    onPick("");
+
+    if (val.trim().length < 2) { setResults([]); return; }
+
+    setSearching(true);
+    API.searchDrivers(val)
+      .then(r => setResults(r || []))
+      .catch(() => setResults([]))
+      .finally(() => setSearching(false));
+  }
+
+  function selectDriver(driver) {
+    setSelectedDriver(driver);
+    setSearch(driver.name || driver.email);
+    setResults([]);
+    onPick("");
+    setLoadingLogs(true);
+    API.getDriverPublicLogs(driver.id, { period: "this_month" })
+      .then(logs => setDriverLogs(logs || []))
+      .catch(() => setDriverLogs([]))
+      .finally(() => setLoadingLogs(false));
+  }
+
+  return (
+    <div>
+      {/* Driver search input */}
+      <div className="form-group" style={{ position: "relative", marginBottom: 12 }}>
+        <label className="form-label">Search Main Driver</label>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input className="form-input"
+            placeholder="Name, email or designation number…"
+            value={search} onChange={handleSearch}
+            style={{ flex: 1 }} />
+          {searching && <span className="spin" style={{ flexShrink: 0 }} />}
+          {selectedDriver && (
+            <span className="badge badge-green" style={{ flexShrink: 0 }}>
+              {selectedDriver.name || selectedDriver.email}
+            </span>
+          )}
+        </div>
+
+        {/* Dropdown */}
+        {results.length > 0 && (
+          <div style={{
+            position: "absolute", top: "100%", left: 0, right: 0, zIndex: 50,
+            background: "var(--bg2)", border: "1px solid var(--border)",
+            borderRadius: "var(--radius)", marginTop: 4,
+            maxHeight: 180, overflowY: "auto",
+          }}>
+            {results.map(d => (
+              <div key={d.id} onClick={() => selectDriver(d)} style={{
+                padding: "9px 14px", cursor: "pointer",
+                borderBottom: "1px solid var(--border)",
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+              }}
+                onMouseEnter={e => e.currentTarget.style.background = "var(--bg3)"}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}
+              >
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>
+                    {d.name || d.email}
+                  </div>
+                  <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)" }}>
+                    {d.email} · {d.designation_number || "No designation"}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {search.length >= 2 && !searching && results.length === 0 && !selectedDriver && (
+          <div style={{ fontFamily: "var(--mono)", fontSize: 11, color: "var(--text3)", marginTop: 5 }}>
+            No drivers found matching "{search}"
+          </div>
+        )}
+      </div>
+
+      {/* Driver log picker */}
+      {selectedDriver && (
+        <div className="form-group">
+          <label className="form-label">
+            {selectedDriver.name || selectedDriver.email}'s Log
+            {forDay && (
+              <span style={{ color: "var(--amber)", marginLeft: 6 }}>
+                (looking for {fmtDate(forDay)})
+              </span>
+            )}
+          </label>
+          {loadingLogs
+            ? <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span className="spin" />
+                <span style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text3)" }}>
+                  Loading logs…
+                </span>
+              </div>
+            : driverLogs.length === 0
+              ? <div style={{ fontFamily: "var(--mono)", fontSize: 12, color: "var(--text3)" }}>
+                  No logs found for this driver this month.
+                </div>
+              : (
+                <select className="form-input form-select"
+                  defaultValue=""
+                  onChange={e => onPick(e.target.value)}>
+                  <option value="">Select their log…</option>
+                  {driverLogs.map(l => {
+                    const isMatch = forDay && l.day === forDay;
+                    return (
+                      <option key={l.id} value={l.id}>
+                        {isMatch ? "✓ " : ""}{fmtDate(l.day)} — {l.from_location || "Log #" + l.id}
+                        {isMatch ? " (same day)" : ""}
+                      </option>
+                    );
+                  })}
+                </select>
+              )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
 // LogDetailModal — full log view with 24-hr grid + activity list
 // ─────────────────────────────────────────────────────────────
 export function LogDetailModal({ log, onClose, onAddAct, onRefresh }) {
-  const [submitting, setSubmitting]   = useState(false);
+  const [submitting, setSubmitting]     = useState(false);
   const [primaryLogId, setPrimaryLogId] = useState("");
 
   const actColors = { D: "driving", ON: "on-duty", OF: "off-duty", SB: "sleeping" };
@@ -169,6 +311,7 @@ export function LogDetailModal({ log, onClose, onAddAct, onRefresh }) {
   }
 
   async function submitCo() {
+    if (!primaryLogId) return;
     setSubmitting(true);
     try {
       await API.submitCoDriver(log.id, parseInt(primaryLogId));
@@ -254,25 +397,17 @@ export function LogDetailModal({ log, onClose, onAddAct, onRefresh }) {
         </div>
       )}
 
-      {/* Co-driver submit section */}
+      {/* Co-driver submit section — uses DriverLogPicker, not a raw ID input */}
       {!log.is_co_driver_entry && (
         <div style={{ borderTop: "1px solid var(--border)", paddingTop: 16 }}>
-          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 8 }}>
+          <div style={{ fontFamily: "var(--mono)", fontSize: 10, color: "var(--text3)", letterSpacing: 1, textTransform: "uppercase", marginBottom: 12 }}>
             Submit as Co-Driver
           </div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <input
-              className="form-input"
-              placeholder="Main driver's log ID"
-              value={primaryLogId}
-              onChange={e => setPrimaryLogId(e.target.value)}
-              style={{ flex: 1 }}
-            />
-            <button className="btn btn-ghost btn-sm" onClick={submitCo}
-              disabled={submitting || !primaryLogId}>
-              {submitting ? <span className="spin" /> : "Submit"}
-            </button>
-          </div>
+          <DriverLogPicker forDay={log.day} onPick={setPrimaryLogId} />
+          <button className="btn btn-primary btn-sm" style={{ marginTop: 12 }}
+            onClick={submitCo} disabled={submitting || !primaryLogId}>
+            {submitting ? <span className="spin" /> : "Submit for Approval"}
+          </button>
         </div>
       )}
     </Modal>
