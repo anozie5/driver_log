@@ -84,6 +84,12 @@ class SignUpSerializer(serializers.ModelSerializer):
         # Prevent users from being both a tenant and a subuser
         if data.get('is_manager') and data.get('is_driver'):
             raise serializers.ValidationError("A user cannot be both a manager and a driver .")
+        
+        # Require at least one role
+        if not data.get('is_manager') and not data.get('is_driver'):
+            raise serializers.ValidationError(
+                {"role": "A user must be either a driver or a manager."}
+            )
 
         return data
 
@@ -164,9 +170,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
         return value
     
     def validate(self, data):
+        is_manager = data.get('is_manager', self.instance.is_manager)
+        is_driver  = data.get('is_driver',  self.instance.is_driver)
+
         # Prevent users from being both a tenant and a subuser
-        if data.get('is_manager') and data.get('is_driver'):
-            raise serializers.ValidationError("A user cannot be both a manager and a driver .")
+        if is_manager and is_driver:
+            raise serializers.ValidationError("A user cannot be both a manager and a driver.")
+
+        # Require at least one role
+        if not is_manager and not is_driver:
+            raise serializers.ValidationError(
+                {"role": "A user must be either a driver or a manager."}
+            )
         
         # Validate full name uniqueness if either first_name or last_name is being updated
         first_name = data.get('first_name', self.instance.first_name)
