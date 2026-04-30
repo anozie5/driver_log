@@ -374,7 +374,7 @@ class ActLogDetailView(APIView):
 
 
 # ---------------------------------------------------------------------------
-# Manager — driver overview
+# Driver overview
 # ---------------------------------------------------------------------------
 
 class DriverOverviewView(APIView):
@@ -456,4 +456,82 @@ class DriverOverviewView(APIView):
                 'designation_number': driver.designation_number,
                 'total_logs': log_count,
             })
+        return Response(data)
+    
+
+class DriverSearchView(APIView):
+    """
+    GET /drivers/search/?q=<query>
+    Returns drivers matching the query against name, email, or
+    designation number. Accessible by any authenticated user
+    (drivers need this to find the main driver when submitting
+    as co-driver).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from authApi.models import User
+        q = request.query_params.get('q', '').strip()
+        if len(q) < 2:
+            return Response([])
+
+        drivers = User.objects.filter(
+            is_driver=True
+        ).filter(
+            Q(first_name__icontains=q) |
+            Q(last_name__icontains=q)  |
+            Q(email__icontains=q)      |
+            Q(designation_number__icontains=q)
+        ).order_by('last_name', 'first_name')[:20]
+
+        data = [
+            {
+                'id': d.pk,
+                'email': d.email,
+                'name': f"{d.first_name} {d.last_name}".strip() or d.email,
+                'designation_number': d.designation_number,
+            }
+            for d in drivers
+        ]
+        return Response(data)
+
+
+class DriverPublicLogsView(APIView):
+    """
+    GET /drivers/<driver_id>/logs/?period=this_month
+    Returns a slim log list for a specific driver.
+    Accessible by any authenticated driver — used by the
+    co-driver submission flow to find the main driver's log.
+    Only exposes: id, day, from_location, to_location.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, driver_id):
+        from authApi.models import User
+        driver = get_object_or_404(User, pk=driver_id, is_driver=True)
+
+        qs = DayLog.objects.filter(user=driver).order_by('-day')
+
+        today = datetime.date.today()
+        period = request.query_params.get('period', 'this_month')
+
+        if period == 'today':
+            qs = qs.filter(day=today)
+        elif period == 'this_week':
+            start = today - datetime.timedelta(days=today.weekday())
+            qs = qs.filter(day__gte=start, day__lte=today)
+        elif period == 'this_month':
+            qs = qs.filter(day__year=today.year, day__month=today.month)
+        elif period == 'this_year':
+            qs = qs.filter(day__year=today.year)
+
+        data = [
+            {
+                'id': log.pk,
+                'day': str(log.day),
+                'from_location': log.from_location,
+                'to_location': log.to_location,
+            }
+            for log in qs[:60]  # cap at 60 entries
+        ]
         return Response(data)

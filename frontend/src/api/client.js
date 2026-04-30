@@ -74,13 +74,14 @@ export const approveCoDriver = (primaryId, coId, approve) =>
     approve,
   });
 
-// ── Manager ───────────────────────────────────────────────────
-export const getDrivers = () => api("GET", "/log/managers/drivers/");
-export const getDriverLogs = (driverId, q) =>
-  api(
-    "GET",
-    `/log/managers/drivers/${driverId}/logs/?${new URLSearchParams(q)}`,
-  );
+// ── All Authenticated User ───────────────────────────────────────────────────
+export const getDrivers = () => api("GET", "/log/managers/drivers/"); // keep for ManagerPage
+export const getDriverLogs = (id, q) =>
+  api("GET", `/log/managers/drivers/${id}/logs/?${new URLSearchParams(q)}`); // keep for ManagerPage
+export const searchDrivers = (q) =>
+  api("GET", `/log/drivers/search/?q=${encodeURIComponent(q)}`);
+export const getDriverPublicLogs = (id, q) =>
+  api("GET", `/log/drivers/${id}/logs/?${new URLSearchParams(q)}`);
 
 // ── Trips ─────────────────────────────────────────────────────
 export const getTrips = () => api("GET", "/trip/trips/");

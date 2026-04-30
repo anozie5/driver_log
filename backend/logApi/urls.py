@@ -37,4 +37,8 @@ urlpatterns = [
     # ------------------------------------------------------------------
     path('managers/drivers/', DriverOverviewView.as_view(), name='manager-drivers'),
     path('managers/drivers/<int:driver_id>/logs/', DriverOverviewView.as_view(), name='manager-driver-logs'),
+
+    # Driver search (for co-driver submission flow)
+    path('drivers/search/', DriverSearchView.as_view(), name='driver-search'),
+    path('drivers/<int:driver_id>/logs/', DriverPublicLogsView.as_view(), name='driver-public-logs'),
 ]
