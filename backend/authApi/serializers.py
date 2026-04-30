@@ -60,7 +60,7 @@ class SignUpSerializer(serializers.ModelSerializer):
         signup_code = data.get('signup_code')
 
         # Validate signup code
-        if signup_code != settings.Reg_Code:
+        if signup_code != settings.REG_CODE:
             raise serializers.ValidationError({"signup_code": "Invalid signup code."})
 
         if password != confirm_password:

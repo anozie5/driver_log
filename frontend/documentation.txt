@@ -1,0 +1,749 @@
+================================================================================
+ELD SYSTEM — FRONTEND TECHNICAL DOCUMENTATION
+================================================================================
+Version    : 1.0.0
+Framework  : React 18 (functional components, hooks)
+Bundler    : Vite
+Styling    : Single imported CSS file (src/styles/global.css)
+Fonts      : Syne (headings) + JetBrains Mono (data) — Google Fonts CDN
+No external UI library dependencies
+================================================================================
+
+
+────────────────────────────────────────────────────────────────────────────────
+TABLE OF CONTENTS
+────────────────────────────────────────────────────────────────────────────────
+  1.  File Structure
+  2.  Module Dependency Graph
+  3.  Design System (src/styles/global.css)
+       3.1  CSS Variables (Design Tokens)
+       3.2  Typography
+       3.3  Utility Classes Reference
+       3.4  Activity Colour Semantics
+  4.  API Client  (src/api/client.js)
+       4.1  Token Management
+       4.2  Base fetch() Wrapper
+       4.3  All Exported Functions
+  5.  Utilities & Hooks  (src/hooks/utils.js)
+  6.  Shared Components  (src/components/)
+       6.1  Icons.jsx
+       6.2  Modal.jsx
+       6.3  ActivityGrid.jsx
+  7.  Pages  (src/pages/)
+       7.1  auth/AuthPage.jsx
+       7.2  logs/LogsPage.jsx
+       7.3  codriver/CoDriverPage.jsx
+       7.4  trips/TripPage.jsx
+       7.5  manager/ManagerPage.jsx
+       7.6  profile/ProfilePage.jsx
+  8.  Root Shell  (src/App.jsx)
+  9.  Entry Point  (src/main.jsx)
+ 10.  State Management
+ 11.  Authentication Flow
+ 12.  Routing & Navigation
+ 13.  Role-based UI
+ 14.  Error Handling
+ 15.  Setup & Configuration
+
+
+────────────────────────────────────────────────────────────────────────────────
+1. FILE STRUCTURE
+────────────────────────────────────────────────────────────────────────────────
+
+  src/
+  ├── main.jsx                        Entry — mounts <App /> into #root
+  ├── App.jsx                         Shell: auth gate · sidebar · topbar · page router
+  │
+  ├── styles/
+  │   └── global.css                  All CSS: tokens, layout, all component styles
+  │
+  ├── api/
+  │   └── client.js                   Token helpers + fetch wrapper + every API call
+  │
+  ├── hooks/
+  │   └── utils.js                    Formatters (fmtDate/Time/Hours) · errorMsg · useAsync
+  │
+  ├── components/                     Shared, reusable UI components
+  │   ├── Icons.jsx                   Inline SVG icon set (Icon object)
+  │   ├── Modal.jsx                   Modal wrapper (backdrop · header · body · footer)
+  │   └── ActivityGrid.jsx            SVG 24-hour ELD graph-line component
+  │
+  └── pages/                          One sub-directory per feature area
+      ├── auth/
+      │   └── AuthPage.jsx            Login + signup
+      ├── logs/
+      │   └── LogsPage.jsx            Log list · LogDetailModal · CreateLogModal
+      │                               AddActModal · ApprovalBadge (named exports)
+      ├── codriver/
+      │   └── CoDriverPage.jsx        Pending approvals + submit-as-co-driver
+      ├── trips/
+      │   └── TripPage.jsx            Trip list · TripDetail · PlanTripModal
+      ├── manager/
+      │   └── ManagerPage.jsx         Driver list + driver log table (manager only)
+      └── profile/
+          └── ProfilePage.jsx         3-tab profile/password/email settings
+
+
+────────────────────────────────────────────────────────────────────────────────
+2. MODULE DEPENDENCY GRAPH
+────────────────────────────────────────────────────────────────────────────────
+
+  main.jsx
+  └── App.jsx
+        ├── styles/global.css              (CSS import — no JS dependency)
+        ├── api/client.js                  (getToken, clearTokens, getProfile,
+        │                                   getPendingCoDrivers)
+        ├── components/Icons.jsx
+        ├── pages/auth/AuthPage.jsx
+        │     ├── api/client.js
+        │     └── hooks/utils.js
+        ├── pages/logs/LogsPage.jsx
+        │     ├── api/client.js
+        │     ├── hooks/utils.js
+        │     ├── components/Icons.jsx
+        │     ├── components/Modal.jsx
+        │     └── components/ActivityGrid.jsx
+        ├── pages/codriver/CoDriverPage.jsx
+        │     ├── api/client.js
+        │     ├── hooks/utils.js
+        │     └── components/Icons.jsx
+        ├── pages/trips/TripPage.jsx
+        │     ├── api/client.js
+        │     ├── hooks/utils.js
+        │     ├── components/Icons.jsx
+        │     ├── components/Modal.jsx
+        │     └── components/ActivityGrid.jsx
+        ├── pages/manager/ManagerPage.jsx
+        │     ├── api/client.js
+        │     ├── hooks/utils.js
+        │     └── pages/logs/LogsPage.jsx  ← reuses LogDetailModal named export
+        └── pages/profile/ProfilePage.jsx
+              ├── api/client.js
+              └── hooks/utils.js
+
+
+────────────────────────────────────────────────────────────────────────────────
+3. DESIGN SYSTEM  (src/styles/global.css)
+────────────────────────────────────────────────────────────────────────────────
+
+3.1  CSS VARIABLES (DESIGN TOKENS)
+────────────────────────────────────
+  Variable            Value        Purpose
+  ──────────────────  ───────────  ────────────────────────────────────────────
+  --bg                #0e0f11      Page background (deepest)
+  --bg2               #16181c      Card / sidebar background
+  --bg3               #1e2128      Input / code block background
+  --border            #2a2d35      All borders and dividers
+  --amber             #f5a623      Primary accent (buttons, active states)
+  --amber2            #ffc453      Amber hover state
+  --text              #e8eaf0      Primary text
+  --text2             #9aa0b0      Secondary text (table data, labels)
+  --text3             #555d6e      Tertiary (meta, timestamps, placeholders)
+  --danger            #e05252      Errors, delete actions
+  --success           #4caf7d      Success states, approve action
+  --info              #5ba4cf      Informational, On Duty activity colour
+  --driving           #f5a623      Driving activity (amber)
+  --on-duty           #5ba4cf      On Duty activity (blue)
+  --off-duty          #4caf7d      Off Duty activity (green)
+  --sleeping          #9b7fe8      Sleeper Berth activity (purple)
+  --radius            6px          Standard border-radius
+  --mono              'JetBrains Mono', monospace
+  --sans              'Syne', sans-serif
+
+
+3.2  TYPOGRAPHY
+────────────────
+  Syne (sans-serif, Google Fonts)
+    Headings, body text, navigation, buttons. Weights: 400/600/700/800.
+
+  JetBrains Mono (monospace, Google Fonts)
+    All data: times, miles, hours, IDs. Column headers. Form labels. Badge text.
+    Weights: 300/400/500/700.
+
+  Size scale:
+    8–10px   SVG labels, column headers, form labels (all-caps + letter-spacing)
+    11–12px  Meta text, badge content, monospaced data
+    13–14px  Body text, table cells, primary data values
+    15–16px  Modal/page headings
+    18–20px  Topbar title, section headings
+    24–26px  Stat card values
+
+
+3.3  UTILITY CLASSES REFERENCE
+────────────────────────────────
+  Layout
+    .shell / .sidebar / .main / .page
+
+  Cards
+    .card / .card-head / .card-head-title / .card-body
+
+  Buttons
+    .btn / .btn-primary / .btn-ghost / .btn-danger / .btn-success / .btn-sm
+
+  Forms
+    .form-group / .form-label / .form-input / .form-select / .form-row / .form-err
+
+  Tables
+    .table-wrap / table / th / td
+
+  Badges
+    .badge / .badge-amber / .badge-green / .badge-red / .badge-blue / .badge-purple
+
+  Stats
+    .stat-row / .stat-card / .stat-label / .stat-value / .stat-unit
+
+  Period Filter
+    .period-bar / .period-btn (.active)
+
+  Tabs
+    .tabs / .tab (.active)
+
+  Timeline (trip stops)
+    .timeline / .tl-item / .tl-spine / .tl-dot / .tl-line / .tl-content
+    .tl-stop-type / .tl-location / .tl-meta
+
+  Auth Page
+    .auth-shell / .auth-bg / .auth-grid / .auth-card / .auth-logo
+    .auth-tagline / .auth-title / .auth-switch / .auth-err
+
+  Modal
+    .modal-backdrop / .modal / .modal-head / .modal-title / .modal-close
+    .modal-body / .modal-footer
+
+  Misc
+    .spin (amber spinner) / .empty / .empty-icon
+    .alert / .alert-success / .alert-err
+    .legend / .legend-item / .legend-dot
+    .cd-card / .cd-card-head / .cd-name / .cd-meta / .cd-actions
+    .mono / .grid-wrap
+
+
+3.4  ACTIVITY COLOUR SEMANTICS
+────────────────────────────────
+  Code  CSS Variable    Hex       ELD Activity
+  ────  ─────────────── ───────── ──────────────────────────────
+  D     --driving        #f5a623  Driving (amber)
+  ON    --on-duty        #5ba4cf  On Duty Not Driving (blue)
+  OF    --off-duty       #4caf7d  Off Duty (green)
+  SB    --sleeping       #9b7fe8  Sleeper Berth (purple)
+
+  Trip stop colours (STOP_COLORS in TripPage.jsx):
+    start → --success  ·  pickup → --amber  ·  dropoff → --danger
+    fuel → --info  ·  rest_break → --text2  ·  sleeper_break → --sleeping
+
+
+────────────────────────────────────────────────────────────────────────────────
+4. API CLIENT  (src/api/client.js)
+────────────────────────────────────────────────────────────────────────────────
+
+4.1  TOKEN MANAGEMENT
+──────────────────────
+  Named exports for use throughout the app:
+
+  getToken()                 → string | null
+  getRefresh()               → string | null
+  saveTokens(access, refresh)→ void  (localStorage)
+  clearTokens()              → void  (removes both keys)
+
+  Storage key names: 'access', 'refresh'.
+  For production, consider httpOnly cookies to mitigate XSS token theft.
+
+
+4.2  BASE FETCH() WRAPPER
+──────────────────────────
+  (Not exported — called only by the endpoint functions below)
+
+  async api(method, path, body?, opts?)
+    - BASE read from import.meta.env.VITE_API_URL || "http://localhost:8000"
+    - Sets Content-Type: application/json
+    - Attaches Authorization: Bearer <token> when a token is stored
+    - 204 responses → returns null
+    - Non-2xx → throws { status: number, data: object }
+    - JSON parse failure → data = {}
+
+
+4.3  ALL EXPORTED FUNCTIONS
+────────────────────────────
+  Auth
+    signup(data)                          POST  /auth/signup/
+    login(data)                           POST  /auth/login/
+    getProfile()                          GET   /auth/profile/
+    updateProfile(data)                   PATCH /auth/profile/
+    resetPassword(data)                   POST  /auth/password-reset/
+    changeEmail(data)                     POST  /auth/change-email/
+
+  Daily Logs
+    getLogs(queryObj)                     GET   /log/logs/?<params>
+    getLog(id)                            GET   /log/logs/<id>/
+    createLog(data)                       POST  /log/logs/
+    patchLog(id, data)                    PATCH /log/logs/<id>/
+    deleteLog(id)                         DELETE /log/logs/<id>/
+
+  Activity Logs
+    getActs(logId)                        GET   /log/logs/<id>/acts/
+    createAct(logId, data)                POST  /log/logs/<id>/acts/
+    patchAct(pk, data)                    PATCH /log/acts/<pk>/
+    deleteAct(pk)                         DELETE /log/acts/<pk>/
+
+  Co-driver
+    getPendingCoDrivers()                 GET   /log/logs/pending-co-drivers/
+    submitCoDriver(logId, primaryId)      POST  /log/logs/<id>/submit-co-driver/
+    approveCoDriver(primaryId,coId,bool)  PATCH /log/logs/<id>/approve-co-driver/
+
+  Manager
+    getDrivers()                          GET   /log/managers/drivers/
+    getDriverLogs(driverId, queryObj)     GET   /log/managers/drivers/<id>/logs/
+
+  Trips
+    getTrips()                            GET   /trip/trips/
+    getTrip(id)                           GET   /trip/trips/<id>/
+    planTrip(data)                        POST  /trip/trips/
+    deleteTrip(id)                        DELETE /trip/trips/<id>/
+    replanTrip(id)                        POST  /trip/trips/<id>/replan/
+
+
+────────────────────────────────────────────────────────────────────────────────
+5. UTILITIES & HOOKS  (src/hooks/utils.js)
+────────────────────────────────────────────────────────────────────────────────
+
+  fmtDate(d)
+    Input : ISO date string or any Date-parseable value
+    Output: "Jun 2, 2025". Returns "—" for falsy.
+
+  fmtTime(dt)
+    Input : ISO datetime string
+    Output: "08:30 AM" (12-hour, no seconds). Returns "—" for falsy.
+
+  fmtHours(h)
+    Input : decimal hours (string or number), e.g. 9.5
+    Output: "9h 30m" (or "9h" if no minutes). Returns "—" for null.
+
+  errorMsg(e)
+    Converts a thrown api() error into a display string:
+      Priority 1: Object.values(e.data).flat().join(" ")  — DRF field errors
+      Priority 2: JSON.stringify(e.data)                   — non-field body
+      Priority 3: String(e)                                — last resort
+
+  useAsync(fn, deps)
+    Custom hook wrapping any async function.
+    Returns: { loading: bool, data: any, error: any, run: fn }
+    run(...args) executes fn, sets loading=true, resolves/rejects and
+    updates state accordingly. run is stable via useCallback(fn, deps).
+
+
+────────────────────────────────────────────────────────────────────────────────
+6. SHARED COMPONENTS  (src/components/)
+────────────────────────────────────────────────────────────────────────────────
+
+6.1  Icons.jsx
+───────────────
+  Exports: const Icon = { Logs, Driver, Profile, Check, X, Plus, Truck, Dash }
+
+  Each value is a zero-prop functional component returning a <svg> element.
+  All use stroke="currentColor" to inherit parent text colour.
+  Sized via CSS: .sb-item svg { width: 16px; height: 16px; }.
+
+  Icon map:
+    Logs    — clipboard/logbook
+    Driver  — person silhouette
+    Profile — person silhouette (aliased)
+    Check   — checkmark (approve)
+    X       — cross (reject)
+    Plus    — plus sign (new / add)
+    Truck   — truck vehicle
+    Dash    — 4-square grid (manager dashboard)
+
+
+6.2  Modal.jsx
+───────────────
+  Props:
+    title    : string       — header text
+    onClose  : () => void   — × button and backdrop click handler
+    children : ReactNode    — body content
+    footer   : ReactNode?   — optional footer (typically action buttons)
+
+  Behaviour:
+    Backdrop click closes only if e.target === e.currentTarget (not children).
+    max-height: 90vh; internal .modal-body scrolls independently.
+    z-index: 100 (above all page content).
+
+
+6.3  ActivityGrid.jsx
+──────────────────────
+  Props:
+    actLogs : ActLog[]   — activity log objects ({ activity, start_time, end_time })
+    day     : string     — YYYY-MM-DD (used as the midnight anchor for slot math)
+
+  Renders a single SVG matching the paper Drivers Daily Log 24-hour grid.
+
+  SVG viewBox: 0 0 1048 167  (LABEL_W=88 + GRID_W=960) × (HEADER_H=22 + 4×ROW_H=144 + 1)
+  preserveAspectRatio="none" — stretches horizontally to fill container.
+  minWidth: 560px prevents collapse on narrow screens.
+
+  Row order (top → bottom, matching the paper form):
+    OF (Off Duty) · SB (Sleeper Berth) · D (Driving) · ON (On Duty Not Driving)
+
+  Slot math:
+    96 slots total (24h × 4 quarter-hours per hour)
+    startSlot = (start_time_ms - dayStart_ms) / (15 * 60000)
+    endSlot   = (end_time_ms - dayStart_ms) / (15 * 60000)
+    Both clamped to [0, 96]
+
+  SVG layer order (bottom → top):
+    1.  Alternating row backgrounds (even: rgba(255,255,255,.02); odd: rgba(0,0,0,.08))
+    2.  Vertical hour grid lines (every 4th slot, 25 lines)
+    3.  Quarter-hour tick marks at top + bottom of each row
+          15-min → 3px  ·  30-min → 5px  ·  1-hr → 8px
+    4.  Horizontal row separator lines
+    5.  Header bottom border + label column right border
+    6.  Hour labels in header strip
+          Mid · 1 · 2 … Noon … 11 · Mid (emphatic at 0, 12, 24)
+    7.  Row labels right-aligned in label column
+          "1: Off Duty", "2: Sleeper\nBerth", "3: Driving", "4: On Duty\n(Not Driving)"
+    8.  Translucent fill rectangles (18% opacity, colour per activity)
+    9.  Continuous <polyline> graph line (stroke: #e8eaf0, width: 2)
+   10.  Transition <circle> dots (r=3.5, fill: #e05252, stroke: #e8eaf0)
+   11.  Empty state <text> centred in grid when segments=[]
+
+  Graph line algorithm:
+    Sort actLogs by start_time.
+    Seed: polyPoints=[startX, curY], dots=[{startX, curY}]
+    For each segment:
+      Detect gap or activity change → push vertical connector points
+      Push horizontal line to segment end X
+      Record fill rect for this segment
+    Final: push end dot.
+    Result: single <polyline> with exact 90° angle transitions.
+
+  Legend: four inline legend items (colour dot + label) below the SVG.
+
+
+────────────────────────────────────────────────────────────────────────────────
+7. PAGES  (src/pages/)
+────────────────────────────────────────────────────────────────────────────────
+
+7.1  auth/AuthPage.jsx
+───────────────────────
+  Default export: AuthPage({ onAuth })
+  Imports: api/client.js · hooks/utils.js
+
+  State: mode ('login'|'signup'), form{}, err, loading
+
+  Login:  API.login() → saveTokens() → onAuth()
+  Signup: API.signup() with all fields → switch to 'login' mode
+
+  Background layers (decorative, pointer-events: none):
+    .auth-bg   — radial gradient amber + blue atmospheric glow
+    .auth-grid — 40×40 CSS grid texture at 30% opacity
+
+
+7.2  logs/LogsPage.jsx
+───────────────────────
+  Default export : LogsPage({ user })
+  Named exports  : LogDetailModal · CreateLogModal · AddActModal · ApprovalBadge
+
+  ── LogsPage ──
+  State: period, logs[], loading, selectedLog, showCreate, showActModal (logId|null)
+  Loads: API.getLogs({ period }) on period change
+  Stats computed client-side: total miles, driving hours, on-duty hours
+  Table columns: Date · From→To · Vehicle · Miles · Driving · On Duty
+                 · Co-Driver · Status (ApprovalBadge) · View
+
+  ── ApprovalBadge({ status }) ──
+  'pending'  → badge-amber "Pending"
+  'approved' → badge-green "Approved"
+  'rejected' → badge-red   "Rejected"
+  else       → badge-blue  "Active"
+  Exported and reused in ManagerPage.
+
+  ── LogDetailModal({ log, onClose, onAddAct, onRefresh }) ──
+  Sections inside Modal:
+    • 2-column header grid (From, To, Vehicle, miles, four hour totals)
+    • 24-Hour Activity Grid heading + <ActivityGrid actLogs day>
+    • Activity table: Type badge · Start · End · Duration · Location
+    • Co-driver submit strip (hidden if log.is_co_driver_entry)
+      Input: primary log ID → API.submitCoDriver(log.id, parseInt(id))
+  Footer: Delete Log · Add Activity · Close
+
+  ── CreateLogModal({ onClose, onCreated }) ──
+  Fields: date (date picker) · from_location · to_location
+          vehicle_number · carrier_name · remarks
+  → API.createLog(form)
+
+  ── AddActModal({ logId, onClose, onCreated }) ──
+  Fields: activity type (D/ON/OF/SB select) · start_time · end_time
+          (datetime-local, appended with ":00Z") · location · remarks
+  Note displayed: "Times must be on 15-minute boundaries"
+  → API.createAct(logId, { ...form, day_log: logId })
+
+
+7.3  codriver/CoDriverPage.jsx
+────────────────────────────────
+  Default export: CoDriverPage()  (no props)
+  Imports: api/client.js · hooks/utils.js · components/Icons.jsx
+
+  Loads on mount (parallel):
+    API.getPendingCoDrivers() → pending[]
+    API.getLogs({ period: 'this_week' }) → myLogs[]
+
+  Pending approvals section:
+    Each .cd-card shows: driver name · date · log ID · miles · driving hours
+    Approve → API.approveCoDriver(primaryId, coId, true) → load()
+    Reject  → API.approveCoDriver(primaryId, coId, false) → load()
+
+  CoDriverSubmitForm (internal, not exported)
+    State: selectedLog (id string), primaryId (string), loading, msg
+    Dropdown of myLogs; text input for primary log ID
+    → API.submitCoDriver(parseInt(selectedLog), parseInt(primaryId))
+    Inline .alert success/error feedback
+
+
+7.4  trips/TripPage.jsx
+────────────────────────
+  Default export: TripPage()  (no props)
+  Internal (not exported): TripDetail, PlanTripModal
+
+  ── TripPage ──
+  State: trips[], loading, selected (full Trip|null), showPlan
+  Full trip loaded via API.getTrip(id) before switching to detail view.
+  List table: # · Route · Departure · Distance · Drive Time · Status · View
+
+  ── TripDetail({ trip, onBack, onDelete }) ──
+  Sections:
+    1. Header bar (← Back · Trip # · status badge · Delete)
+    2. Stat row (distance · drive time · stops count · ELD days count)
+    3. 2-column:
+       Left  — Route Info card (from/pickup/dropoff/departure/cycle used)
+       Right — Stops timeline card (scrollable, STOP_COLORS dots, notes)
+    4. Generated ELD Logs section (one entry per trip.day_logs element):
+       Amber day label · 4 hour mini-cards · <ActivityGrid>
+
+  ── PlanTripModal({ onClose, onPlanned }) ──
+  Fields: current_location · pickup_location · dropoff_location
+          departure_time (datetime-local, appended ":00Z") · current_cycle_used
+  Amber info alert shown during planning (geocoding takes ~2–5 s)
+  HOS rules reference box at bottom of form
+  → API.planTrip(form) → onPlanned(trip)
+
+
+7.5  manager/ManagerPage.jsx
+──────────────────────────────
+  Default export: ManagerPage()  (no props — manager-only)
+  Imports: api/client.js · hooks/utils.js · pages/logs/LogsPage.jsx (LogDetailModal)
+
+  State: drivers[], selected (driver obj|null), driverLogs[],
+         period, loading, logDetail (full DayLog|null)
+
+  On mount: API.getDrivers() → drivers[]
+  On selected/period change: API.getDriverLogs(selected.id, { period }) → driverLogs[]
+
+  Layout: 2-column CSS grid (240px driver list + 1fr detail pane)
+
+  Driver list: click selects; active row shows amber left border + bg3 background.
+
+  Detail pane:
+    Driver name + email heading
+    Period filter bar
+    4 stat cards (logs · miles · drive hrs · on duty) — computed client-side
+    Logs table (Date · From→To · Miles · Driving · On Duty · Co-Driver · View)
+    View → API.getLog(id) → setLogDetail → opens LogDetailModal
+
+  LogDetailModal reuse:
+    Imported named export from logs/LogsPage.jsx.
+    onAddAct and onRefresh are passed as no-ops — managers cannot modify logs.
+
+
+7.6  profile/ProfilePage.jsx
+──────────────────────────────
+  Default export: ProfilePage({ user, onUpdated })
+  Imports: api/client.js · hooks/utils.js
+
+  State: tab, form, pwForm, emailForm, msg, loading
+
+  Profile tab:
+    Editable: first_name · last_name · username · designation_number
+    Read-only: email (opacity 0.5), role badges (Driver/Manager)
+    → API.updateProfile() → onUpdated() (reloads user in App)
+
+  Password tab:
+    Fields: new_password · confirm_password
+    → API.resetPassword()
+
+  Email tab:
+    Fields: current_password · new_email
+    → API.changeEmail()
+
+  Tab switch resets msg to null (clears previous success/error).
+
+
+────────────────────────────────────────────────────────────────────────────────
+8. ROOT SHELL  (src/App.jsx)
+────────────────────────────────────────────────────────────────────────────────
+
+  Responsibilities:
+    • Imports styles/global.css (single stylesheet for the whole app)
+    • Auth gate: !!getToken() → initial authed state
+    • loadUser(): getProfile() + getPendingCoDrivers() → user + pendingCount
+    • Auth failure in loadUser → clearTokens() + setAuthed(false)
+    • Renders <AuthPage> when !authed
+    • Renders full-screen spinner while user is null
+    • Builds role-aware navItems[]
+    • Renders sidebar + topbar + active page component
+    • logout(): clearTokens() + reset authed + user
+
+  Page state: string key ('logs'|'codriver'|'trips'|'manager'|'profile')
+  navItems built from isDriver / isManager flags:
+    isDriver  → Logs · Co-Driver (with "(N)" pending count) · Trip Planner
+    isManager → Driver Overview
+    always    → Profile
+
+
+────────────────────────────────────────────────────────────────────────────────
+9. ENTRY POINT  (src/main.jsx)
+────────────────────────────────────────────────────────────────────────────────
+
+  Standard Vite + React entry. Mounts <App /> in <StrictMode> into #root.
+  No providers, router, or context at this level.
+
+
+────────────────────────────────────────────────────────────────────────────────
+10. STATE MANAGEMENT
+────────────────────────────────────────────────────────────────────────────────
+
+  No global state library. All state is colocated with its owner and
+  communicated via props and callbacks.
+
+  Owner         State held
+  ────────────  ──────────────────────────────────────────────────────────────
+  App           authed, user, page, pendingCount
+  LogsPage      period, logs[], loading, selectedLog, showCreate, showActModal
+  CoDriverPage  pending[], myLogs[], loading
+  TripPage      trips[], loading, selected, showPlan
+  ManagerPage   drivers[], selected, driverLogs[], period, loading, logDetail
+  ProfilePage   tab, form, pwForm, emailForm, msg, loading
+  AuthPage      mode, form, err, loading
+
+  Cross-component sharing:
+    LogDetailModal is exported from logs/LogsPage.jsx and imported by
+    ManagerPage.jsx — the only cross-page component dependency in the app.
+
+  Parent–child communication: props down, callbacks up.
+  Post-action refresh: parent's load() called from child callbacks.
+
+
+────────────────────────────────────────────────────────────────────────────────
+11. AUTHENTICATION FLOW
+────────────────────────────────────────────────────────────────────────────────
+
+  Initial load:
+    !!getToken() → authed=true → loadUser() runs
+    loadUser() success → user set, pendingCount updated
+    loadUser() failure (401/network) → clearTokens() → authed=false → AuthPage
+
+  Login:  API.login() → saveTokens() → onAuth() → App reloads user
+  Logout: clearTokens() → authed=false → user=null → AuthPage
+
+  Mid-session expiry (401 on any call):
+    Components surface via errorMsg(). No auto-refresh implemented.
+    Production: intercept 401 in api(), POST to /auth/token/refresh/,
+    update localStorage, retry the original request.
+
+
+────────────────────────────────────────────────────────────────────────────────
+12. ROUTING & NAVIGATION
+────────────────────────────────────────────────────────────────────────────────
+
+  No React Router. Navigation is a page state string in App.jsx.
+
+  Pages:
+    'logs'      → LogsPage      (drivers only)
+    'codriver'  → CoDriverPage  (drivers only)
+    'trips'     → TripPage      (drivers only)
+    'manager'   → ManagerPage   (managers only)
+    'profile'   → ProfilePage   (all authenticated users)
+
+  Sub-navigation within pages:
+    TripPage: selected trip toggles between list and TripDetail in-place
+    ManagerPage: selected driver updates the detail pane without changing page
+
+
+────────────────────────────────────────────────────────────────────────────────
+13. ROLE-BASED UI
+────────────────────────────────────────────────────────────────────────────────
+
+  isManager = user.is_manager || user.is_staff  (mirrors backend)
+  isDriver  = user.is_driver
+
+  Role        Pages visible                  Write capabilities
+  ─────────── ─────────────────────────────  ──────────────────────────────────
+  Driver      Logs · Co-Driver · Trips       Create/edit/delete own logs and acts
+              Profile                         Co-driver submit + approve/reject
+                                              Plan trips
+                                              Update profile/password/email
+
+  Manager     Driver Overview · Profile      Read-only access to all driver logs
+                                              Update own profile/password/email
+
+  Mutually exclusive: enforced at signup and profile update on the backend.
+  The frontend's navItems[] simply omits pages the role doesn't have.
+
+
+────────────────────────────────────────────────────────────────────────────────
+14. ERROR HANDLING
+────────────────────────────────────────────────────────────────────────────────
+
+  api() throws { status, data } on non-2xx responses.
+  errorMsg(e) converts these to display strings.
+
+  Three patterns used:
+
+  1. Inline form error state
+       const [err, setErr] = useState("");
+       catch (e) { setErr(errorMsg(e)); }
+       Rendered: <div className="auth-err">{err}</div>
+       Used in: AuthPage, CreateLogModal, AddActModal, PlanTripModal
+
+  2. Msg object for success + error
+       const [msg, setMsg] = useState(null);
+       setMsg({ type: "success"|"err", text: "..." });
+       Rendered: <div className={`alert alert-${msg.type}`}>{msg.text}</div>
+       Used in: ProfilePage, CoDriverSubmitForm
+
+  3. Native alert() for simple row actions
+       catch (e) { alert(errorMsg(e)); }
+       Used in: CoDriverPage approve/reject, LogDetailModal submitCo
+
+
+────────────────────────────────────────────────────────────────────────────────
+15. SETUP & CONFIGURATION
+────────────────────────────────────────────────────────────────────────────────
+
+  Prerequisites: Node 18+, npm or yarn
+
+  1. Scaffold:
+       npm create vite@latest frontend -- --template react
+       cd frontend
+
+  2. Replace src/:
+       Copy the provided src/ directory over the generated one.
+
+  3. Create .env:
+       VITE_API_URL=http://localhost:8000
+
+  4. Start dev server:
+       npm run dev   →  http://localhost:5173
+
+  CORS — add to Django settings.py:
+       pip install django-cors-headers
+       INSTALLED_APPS += ['corsheaders']
+       MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware', ...rest...]
+       CORS_ALLOWED_ORIGINS = ['http://localhost:5173']
+
+  Production build:
+       npm run build
+       # Serve dist/ with nginx, Vercel, Netlify, or any static host
+       # Set VITE_API_URL to your deployed backend URL in build env
+
+================================================================================
+END OF FRONTEND DOCUMENTATION (v2.0)
+================================================================================

@@ -158,7 +158,7 @@ TEMPLATES = [
 ]
 
 
-Reg_Code = config('REG_CODE')
+REG_CODE = config('REG_CODE')
 ORS_API_KEY = config('ORS_API_KEY')
 
 WSGI_APPLICATION = 'backend.wsgi.application'
