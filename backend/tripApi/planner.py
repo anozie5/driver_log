@@ -1,4 +1,6 @@
 """
+tripApi/planner.py
+
 Orchestrates the full trip planning pipeline:
 
   1. Geocode the three locations (current, pickup, dropoff)
@@ -6,8 +8,7 @@ Orchestrates the full trip planning pipeline:
   3. Run the HOS engine (hos.py) to produce stops + activity segments
   4. Persist everything: Trip, TripStop, DayLog, ActLog, TripDayLog
 
-Called from the API view — always runs synchronously (cheap enough, see
-earlier discussion on signals vs async tasks).
+Called from the API view — always runs synchronously (cheap enough).
 
 Map API used: OpenRouteService (ORS)
   - Free tier: 2,000 req/day, no credit card required
@@ -90,10 +91,10 @@ def get_route(coords: list) -> dict:
 
 def extract_leg_distances(route_json: dict) -> tuple:
     """
-    Pull per-segment distances (in miles) and total distance from an ORS
-    GeoJSON directions response.
+    Pull distance in miles and total distance from a single-leg ORS
+    GeoJSON directions response (two waypoints only).
 
-    Returns (leg_miles_list, total_miles, geojson_feature)
+    Returns (distance_miles, geojson_feature)
     """
     features = route_json.get('features', [])
     if not features:
@@ -101,14 +102,11 @@ def extract_leg_distances(route_json: dict) -> tuple:
 
     feature = features[0]
     props = feature['properties']
-    segments = props.get('segments', [])
 
-    # ORS returns distances in metres
     M_TO_MILES = 0.000621371
-    leg_miles = [seg['distance'] * M_TO_MILES for seg in segments]
-    total_miles = props['summary']['distance'] * M_TO_MILES
+    distance_miles = props['summary']['distance'] * M_TO_MILES
 
-    return leg_miles, total_miles, feature
+    return distance_miles, feature
 
 
 # ---------------------------------------------------------------------------
@@ -221,17 +219,22 @@ def execute_trip_plan(trip_id: int) -> Trip:
         pickup_coord  = geocode(trip.pickup_location)
         dropoff_coord = geocode(trip.dropoff_location)
 
-        # -- 2. Route --
-        logger.info('Fetching route for trip #%s', trip_id)
-        route_json = get_route([current_coord, pickup_coord, dropoff_coord])
-        leg_miles, total_miles, route_feature = extract_leg_distances(route_json)
+        # -- 2. Route — fetch each leg separately so we always get
+        #    exactly one segment regardless of ORS simplification.
+        logger.info('Fetching route legs for trip #%s', trip_id)
 
-        # ORS may return 2 legs (current→pickup, pickup→dropoff)
-        if len(leg_miles) < 2:
-            raise RuntimeError('Expected 2 route legs; ORS returned fewer.')
+        leg1_route = get_route([current_coord, pickup_coord])
+        leg1_miles, leg1_feature = extract_leg_distances(leg1_route)
 
-        leg1_miles, leg2_miles = leg_miles[0], leg_miles[1]
+        leg2_route = get_route([pickup_coord, dropoff_coord])
+        leg2_miles, leg2_feature = extract_leg_distances(leg2_route)
+
+        total_miles = leg1_miles + leg2_miles
         total_driving_hours = total_miles / AVERAGE_SPEED_MPH
+
+        # Use the first leg's GeoJSON as the stored route feature.
+        # In a future iteration this can be merged into a single LineString.
+        route_feature = leg1_feature
 
         # -- 3. HOS engine --
         logger.info('Running HOS engine for trip #%s (%.1f miles)', trip_id, total_miles)
